@@ -17,6 +17,10 @@
 			"TargetAllowList": [
 				"Editor"
 			]
+		},
+		{
+			"Name": "ThermalVision",
+			"Enabled": true
 		}
 	]
 }
