@@ -4,8 +4,11 @@
 #include "Interfaces/IPluginManager.h"
 #include "ShaderCore.h"
 #include "Misc/Paths.h"
+#include "ThermalVisionLog.h"
 
 #define LOCTEXT_NAMESPACE "FThermalVisionModule"
+
+DEFINE_LOG_CATEGORY(LogThermalVision)
 
 void FThermalVisionModule::StartupModule()
 {
