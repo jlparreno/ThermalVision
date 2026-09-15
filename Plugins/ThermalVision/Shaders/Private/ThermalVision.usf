@@ -1,0 +1,18 @@
+#include "/Engine/Public/Platform.ush"
+
+Texture2D InputTexture;
+SamplerState InputSampler;
+
+void MainPS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0,
+    float4 SvPosition : SV_POSITION,
+    out float4 OutColor : SV_Target0
+)
+{
+    float2 UV = UVAndScreenPos.xy;
+    float4 SceneColor = InputTexture.SampleLevel(InputSampler, UV, 0);
+    
+    float output = dot(SceneColor.rgb, float3(0.2126, 0.7152, 0.0722));
+    
+    OutColor = float4(output.xxx, SceneColor.a);
+}

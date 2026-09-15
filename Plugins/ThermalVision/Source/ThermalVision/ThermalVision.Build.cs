@@ -36,7 +36,8 @@ public class ThermalVision : ModuleRules
 				"RenderCore",
 				"CoreUObject",
 				"Engine",
-				"Renderer"
+				"Renderer",
+				"RHI"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
