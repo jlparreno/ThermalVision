@@ -1,7 +1,33 @@
-#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ScreenPass.ush"
+#include "/Engine/Private/SceneTexturesCommon.ush"
 
+// Reverse-Z with an infinite far plane puts the sky at +inf linear depth.
+// Clamp to the same far value the engine uses when scene textures are disabled.
+#define THERMAL_VISION_MAX_DEPTH 1e6
+
+// Tonemapped scene color from the previous post-process pass (output resolution).
 Texture2D InputTexture;
 SamplerState InputSampler;
+
+// Declares Input_Extent, Input_UVViewportMin, Input_UVViewportSizeInverse, ...
+// Describes the view rect inside InputTexture, which can be smaller than the texture itself.
+SCREEN_PASS_TEXTURE_VIEWPORT(Input)
+
+// Relative depth difference above which a pixel is considered an edge.
+float OutlineDepthThreshold;
+
+// Reads scene depth (render resolution) and returns linear view-space depth.
+float SampleLinearDepth(float2 BufferUV)
+{
+    // Keep the sample inside the view rect of the scene textures. The pooled texture can be larger
+    // than the view, so neighbors at the viewport border would otherwise read unrelated depth.
+    // The rect is shrunk by half a texel, so even point sampling never picks a texel outside it.
+    BufferUV = clamp(BufferUV, View.BufferBilinearUVMinMax.xy, View.BufferBilinearUVMinMax.zw);
+
+    // CalcSceneDepth reads the device Z and converts it to linear depth with View.InvDeviceZToWorldZTransform.
+    return min(CalcSceneDepth(BufferUV), THERMAL_VISION_MAX_DEPTH);
+}
 
 void MainPS(
     noperspective float4 UVAndScreenPos : TEXCOORD0,
@@ -9,10 +35,37 @@ void MainPS(
     out float4 OutColor : SV_Target0
 )
 {
+    // --- Color ---
     float2 UV = UVAndScreenPos.xy;
     float4 SceneColor = InputTexture.SampleLevel(InputSampler, UV, 0);
+
+    // Value to convert to grayscale
+    float Luma = dot(SceneColor.rgb, float3(0.2126, 0.7152, 0.0722));
+
+    // --- Resolution mapping ---
+    // SceneColor UV -> viewport UV -> scene depth UV (render resolution)
     
-    float output = dot(SceneColor.rgb, float3(0.2126, 0.7152, 0.0722));
+    // 1) Remove the input rect offset and scale: 0..1 across the view, independent of any texture size.
+    float2 ViewportUV = (UV - Input_UVViewportMin) * Input_UVViewportSizeInverse;
+    // 2) Map 0..1 into the scene textures using the render-resolution rect from the View uniform buffer:
+    float2 DepthUV = ViewportUVToBufferUV(ViewportUV);
     
-    OutColor = float4(output.xxx, SceneColor.a);
+    // One texel of the depth buffer. With r.ScreenPercentage 50 this spans two output pixels.
+    float2 DepthTexelSize = View.BufferSizeAndInvSize.zw;
+
+    // --- Edge detection ---
+    // Center depth plus the 4 neighbors in a cross, one depth texel away.
+    // Only the farthest neighbor matters: if it doesn't pass the threshold, none of them does.
+    float CenterDepth = SampleLinearDepth(DepthUV);
+    float FarthestNeighborDepth = max(max(SampleLinearDepth(DepthUV + float2(DepthTexelSize.x, 0.0)), SampleLinearDepth(DepthUV - float2(DepthTexelSize.x, 0.0))),
+                                      max(SampleLinearDepth(DepthUV + float2(0.0, DepthTexelSize.y)), SampleLinearDepth(DepthUV - float2(0.0, DepthTexelSize.y))));
+
+    // A pixel is an edge when something behind it is at least OutlineDepthThreshold times farther, 
+    // so the line stays one texel wide on the closer object instead of doubling on both sides of the silhouette.
+    // Sky is clamped to THERMAL_VISION_MAX_DEPTH, so a sky center gives 0 and never becomes an edge.
+    float Edge = (FarthestNeighborDepth - CenterDepth) / CenterDepth > OutlineDepthThreshold ? 1.0 : 0.0;
+
+    // --- Output ---
+    // Grayscale with black outlines. Alpha is passed through untouched.
+    OutColor = float4((Luma * (1.0 - Edge)).xxx, SceneColor.a);
 }
