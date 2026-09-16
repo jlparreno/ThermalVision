@@ -19,14 +19,22 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputTexture)
 		// Sampler for InputTexture. Point clamp: input and output rects have the same size, so each pixel reads its own texel.
 		SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
-		// Reference to the view uniform buffer the renderer already uploaded, to access the render resolution rect and depth linearization.
+		// Reference to the view uniform buffer the renderer already uploaded, to access the render resolution rect
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-		// Scene textures RDG uniform buffer, used to read scene depth. RDG marks every texture inside it as read by this pass.
+		// Scene textures RDG uniform buffer, used to read scene depth, custom depth and custom stencil. RDG marks every texture inside it as read by this pass.
 		SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
 		// Rect of the SceneColor input inside its texture, to convert input UVs to viewport UVs. Must match SCREEN_PASS_TEXTURE_VIEWPORT(Input) in the .usf.
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
-		// Relative depth difference to the farthest neighbor above which a pixel is an outline. Read from r.ThermalVision.OutlineThreshold on the render thread.
-		SHADER_PARAMETER(float, OutlineDepthThreshold)
+		// Temperature in Celsius for pixels with no custom stencil value. Placeholder kept as the base of the ambient estimation.
+		SHADER_PARAMETER(float, AmbientTemperature)
+		// Temperature in Celsius mapped to the cold end of the palette. Everything below saturates.
+		SHADER_PARAMETER(float, TemperatureRangeMin)
+		// Temperature in Celsius mapped to the hot end of the palette. Everything above saturates.
+		SHADER_PARAMETER(float, TemperatureRangeMax)
+		// Degrees Celsius added to the ambient temperature at full scene luminance. Fakes sunlit or lit surfaces reading warmer.
+		SHADER_PARAMETER(float, LuminanceTemperatureGain)
+		// Temperature in Celsius for pixels with no geometry: the sky reads cold on a real thermal camera.
+		SHADER_PARAMETER(float, SkyTemperature)
 		// Render targets written by this pass. RenderTargets[0] is the pass output (OverrideOutput or a new texture).
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()

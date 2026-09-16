@@ -11,9 +11,29 @@ static TAutoConsoleVariable<bool> CVarThermalVisionEnable(
 	TEXT("r.ThermalVision.Enable"), false,
 	TEXT("Enables the thermal vision post-process."));
 
-static TAutoConsoleVariable<float> CVarThermalVisionOutlineThreshold(
-	TEXT("r.ThermalVision.OutlineThreshold"), 0.1f,
-	TEXT("Relative depth difference to a neighbor above which a pixel is drawn as an outline."),
+static TAutoConsoleVariable<float> CVarThermalVisionAmbientTemperature(
+	TEXT("r.ThermalVision.AmbientTemperature"), 20.0f,
+	TEXT("Temperature in Celsius used for pixels with no custom stencil value."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionTemperatureMin(
+	TEXT("r.ThermalVision.TemperatureMin"), 0.0f,
+	TEXT("Temperature in Celsius mapped to the cold end of the palette."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionTemperatureMax(
+	TEXT("r.ThermalVision.TemperatureMax"), 100.0f,
+	TEXT("Temperature in Celsius mapped to the hot end of the palette."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionLuminanceTemperatureGain(
+	TEXT("r.ThermalVision.LuminanceTemperatureGain"), 15.0f,
+	TEXT("Degrees Celsius added to the ambient temperature at full scene luminance."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionSkyTemperature(
+	TEXT("r.ThermalVision.SkyTemperature"), -20.0f,
+	TEXT("Temperature in Celsius used for pixels with no geometry."),
 	ECVF_RenderThreadSafe);
 
 
@@ -69,10 +89,16 @@ FScreenPassTexture FThermalVisionSceneViewExtension::PostProcessPassAfterTonemap
 	// textures buffer holds the depth. Same bindings the engine uses for post process materials.
 	PassParameters->View = View.ViewUniformBuffer;
 	PassParameters->SceneTextures = Inputs.SceneTextures;
+	
 	// Input rect in UV space, used by the shader to go from input UVs to viewport UVs.
 	PassParameters->Input = GetScreenPassTextureViewportParameters(InputViewport);
-	// Render thread read: the cvar is ECVF_RenderThreadSafe, so this is the value for this frame.
-	PassParameters->OutlineDepthThreshold = CVarThermalVisionOutlineThreshold.GetValueOnRenderThread();
+
+	// Render thread read: the cvars are ECVF_RenderThreadSafe, so this is the value for this frame.
+	PassParameters->AmbientTemperature = CVarThermalVisionAmbientTemperature.GetValueOnRenderThread();
+	PassParameters->TemperatureRangeMin = CVarThermalVisionTemperatureMin.GetValueOnRenderThread();
+	PassParameters->TemperatureRangeMax = CVarThermalVisionTemperatureMax.GetValueOnRenderThread();
+	PassParameters->LuminanceTemperatureGain = CVarThermalVisionLuminanceTemperatureGain.GetValueOnRenderThread();
+	PassParameters->SkyTemperature = CVarThermalVisionSkyTemperature.GetValueOnRenderThread();
 
 	// Get global shader
 	// Compiled at startup into the global shader map for this feature level.

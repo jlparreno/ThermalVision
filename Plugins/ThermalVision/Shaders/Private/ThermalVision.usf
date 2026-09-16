@@ -1,10 +1,7 @@
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Private/ScreenPass.ush"
 #include "/Engine/Private/SceneTexturesCommon.ush"
-
-// Reverse-Z with an infinite far plane puts the sky at +inf linear depth.
-// Clamp to the same far value the engine uses when scene textures are disabled.
-#define THERMAL_VISION_MAX_DEPTH 1e6
+#include "/Engine/Private/GammaCorrectionCommon.ush"
 
 // Tonemapped scene color from the previous post-process pass (output resolution).
 Texture2D InputTexture;
@@ -14,19 +11,29 @@ SamplerState InputSampler;
 // Describes the view rect inside InputTexture, which can be smaller than the texture itself.
 SCREEN_PASS_TEXTURE_VIEWPORT(Input)
 
-// Relative depth difference above which a pixel is considered an edge.
-float OutlineDepthThreshold;
+float AmbientTemperature;
+float TemperatureRangeMin;
+float TemperatureRangeMax;
+float LuminanceTemperatureGain;
+float SkyTemperature;
 
-// Reads scene depth (render resolution) and returns linear view-space depth.
-float SampleLinearDepth(float2 BufferUV)
+// Ironbow-style ramp evaluated analytically. Each lerp only starts once the previous segment is saturated.
+float3 ThermalPalette(float NormalizedTemperature)
 {
-    // Keep the sample inside the view rect of the scene textures. The pooled texture can be larger
-    // than the view, so neighbors at the viewport border would otherwise read unrelated depth.
-    // The rect is shrunk by half a texel, so even point sampling never picks a texel outside it.
-    BufferUV = clamp(BufferUV, View.BufferBilinearUVMinMax.xy, View.BufferBilinearUVMinMax.zw);
+    const float3 Cold = float3(0.00, 0.00, 0.05); // near black, slightly blue
+    const float3 Purple = float3(0.28, 0.00, 0.42);
+    const float3 Red = float3(0.85, 0.15, 0.20);
+    const float3 Orange = float3(1.00, 0.60, 0.00);
+    const float3 Hot = float3(1.00, 1.00, 0.85); // white hot
 
-    // CalcSceneDepth reads the device Z and converts it to linear depth with View.InvDeviceZToWorldZTransform.
-    return min(CalcSceneDepth(BufferUV), THERMAL_VISION_MAX_DEPTH);
+    // There are 4 segments, so convert normalized temperature to 0..4
+    float Segment = NormalizedTemperature * 4.0;
+
+    float3 Color = lerp(Cold, Purple, saturate(Segment));
+    Color = lerp(Color, Red, saturate(Segment - 1.0));
+    Color = lerp(Color, Orange, saturate(Segment - 2.0));
+    Color = lerp(Color, Hot, saturate(Segment - 3.0));
+    return Color;
 }
 
 void MainPS(
@@ -35,37 +42,52 @@ void MainPS(
     out float4 OutColor : SV_Target0
 )
 {
-    // --- Color ---
+    // Scene Color, tonemapped
     float2 UV = UVAndScreenPos.xy;
     float4 SceneColor = InputTexture.SampleLevel(InputSampler, UV, 0);
 
-    // Value to convert to grayscale
-    float Luma = dot(SceneColor.rgb, float3(0.2126, 0.7152, 0.0722));
-
-    // --- Resolution mapping ---
-    // SceneColor UV -> viewport UV -> scene depth UV (render resolution)
-    
+    // Resolution mapping
     // 1) Remove the input rect offset and scale: 0..1 across the view, independent of any texture size.
     float2 ViewportUV = (UV - Input_UVViewportMin) * Input_UVViewportSizeInverse;
     // 2) Map 0..1 into the scene textures using the render-resolution rect from the View uniform buffer:
-    float2 DepthUV = ViewportUVToBufferUV(ViewportUV);
+    float2 StencilUV = ViewportUVToBufferUV(ViewportUV);
     
-    // One texel of the depth buffer. With r.ScreenPercentage 50 this spans two output pixels.
-    float2 DepthTexelSize = View.BufferSizeAndInvSize.zw;
+    // Keep the sample inside the view rect: the pooled texture is larger than the view
+    float2 ClampedStencilUV = clamp(StencilUV, View.BufferBilinearUVMinMax.xy, View.BufferBilinearUVMinMax.zw);
 
-    // --- Edge detection ---
-    // Center depth plus the 4 neighbors in a cross, one depth texel away.
-    // Only the farthest neighbor matters: if it doesn't pass the threshold, none of them does.
-    float CenterDepth = SampleLinearDepth(DepthUV);
-    float FarthestNeighborDepth = max(max(SampleLinearDepth(DepthUV + float2(DepthTexelSize.x, 0.0)), SampleLinearDepth(DepthUV - float2(DepthTexelSize.x, 0.0))),
-                                      max(SampleLinearDepth(DepthUV + float2(0.0, DepthTexelSize.y)), SampleLinearDepth(DepthUV - float2(0.0, DepthTexelSize.y))));
+    // Stencil sample
+    // Custom stencil is a uint2 Shader Resource View: integer texel coords, no filtering.
+    uint2 ScenePixelPos = (uint2) floor(ClampedStencilUV * View.BufferSizeAndInvSize.xy);
+    uint StencilValue = CalcSceneCustomStencil(ScenePixelPos);
+    
+    // IsSky check
+    // DeviceZ is 0 at the far plane with reverse-Z: nothing was rendered, so this pixel is sky.
+    float DeviceZ = LookupDeviceZ(ScenePixelPos); // Gets scene depth
+    bool bIsSky = DeviceZ <= 0.0;
 
-    // A pixel is an edge when something behind it is at least OutlineDepthThreshold times farther, 
-    // so the line stays one texel wide on the closer object instead of doubling on both sides of the silhouette.
-    // Sky is clamped to THERMAL_VISION_MAX_DEPTH, so a sky center gives 0 and never becomes an edge.
-    float Edge = (FarthestNeighborDepth - CenterDepth) / CenterDepth > OutlineDepthThreshold ? 1.0 : 0.0;
+    // Luminance
+    // Tonemapped color is display encoded, so linearize it before measuring luminance.
+    float SceneLuminance = Luminance(sRGBToLinear(SceneColor.rgb));
 
-    // --- Output ---
-    // Grayscale with black outlines. Alpha is passed through untouched.
-    OutColor = float4((Luma * (1.0 - Edge)).xxx, SceneColor.a);
+    // Untagged geometry: brighter surfaces read warmer. A heuristic, not radiometry.
+    float AmbientSceneTemperature = AmbientTemperature + LuminanceTemperatureGain * SceneLuminance;
+
+    // Check if the object is occluded
+    // Compare against scene depth in the same texel: with reverse-Z, nearer is a larger device Z.
+    float CustomDeviceZ = SceneTexturesStruct.CustomDepthTexture.Load(int3(ScenePixelPos, 0)).r; // Gets the depth in the custom depth texture (object marked in stencil)
+    bool bTagVisible = StencilValue > 0 && CustomDeviceZ >= DeviceZ;
+    
+    // Initialize temperature with ambient
+    float Temperature = AmbientSceneTemperature;
+
+    // If the stencil has a value, update temperature with that value
+    if (bTagVisible) Temperature = (float) StencilValue;
+    
+    // If the pixel is sky, use sky temperature
+    if(bIsSky) Temperature = SkyTemperature;
+
+    //Normalize temperature to use the ThermalPalette function
+    float NormalizedTemperature = saturate((Temperature - TemperatureRangeMin) / max(TemperatureRangeMax - TemperatureRangeMin, 0.001));
+
+    OutColor = float4(ThermalPalette(NormalizedTemperature), SceneColor.a);
 }
