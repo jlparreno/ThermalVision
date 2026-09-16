@@ -4,18 +4,27 @@
 #include "/Engine/Private/GammaCorrectionCommon.ush"
 
 // Tonemapped scene color from the previous post-process pass (output resolution).
-Texture2D InputTexture;
+Texture2D    InputTexture;
 SamplerState InputSampler;
+
+// Our own intermediate texture, holding the temperature field in Celsius: written through the UAV
+// by the compute passes, read as a plain texture by the composite pixel shader.
+RWTexture2D<float>  OutTemperatureTexture;
+Texture2D<float>    TemperatureTexture;
 
 // Declares Input_Extent, Input_UVViewportMin, Input_UVViewportSizeInverse, ...
 // Describes the view rect inside InputTexture, which can be smaller than the texture itself.
 SCREEN_PASS_TEXTURE_VIEWPORT(Input)
 
+// Pass parameters, filled from the FParameters structs; see ThermalVisionShaders.h for what each one means.
 float AmbientTemperature;
 float TemperatureRangeMin;
 float TemperatureRangeMax;
 float LuminanceTemperatureGain;
 float SkyTemperature;
+int2  BlurDirection;
+int   BlurRadius;
+float BlurSigma;
 
 // Ironbow-style ramp evaluated analytically. Each lerp only starts once the previous segment is saturated.
 float3 ThermalPalette(float NormalizedTemperature)
@@ -36,20 +45,22 @@ float3 ThermalPalette(float NormalizedTemperature)
     return Color;
 }
 
-void MainPS(
-    noperspective float4 UVAndScreenPos : TEXCOORD0,
-    float4 SvPosition : SV_POSITION,
-    out float4 OutColor : SV_Target0
-)
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void TemperatureCS(uint2 DispatchThreadId : SV_DispatchThreadID)
 {
-    // Scene Color, tonemapped
-    float2 UV = UVAndScreenPos.xy;
+    // The dispatch is rounded up to whole groups, so the last row and column overshoot the viewport.
+    if (any(DispatchThreadId >= (uint2) Input_ViewportSize))
+    {
+        return;
+    }
+
+    // Viewport UV from the thread id: 0..1 across the view, sampled at the pixel center.
+    float2 ViewportUV = ((float2) DispatchThreadId + 0.5) * Input_ViewportSizeInverse;
+
+    // Scene color lives in the input texture, which can be larger than the viewport.
+    float2 UV = Input_UVViewportMin + ViewportUV * Input_UVViewportSize;
     float4 SceneColor = InputTexture.SampleLevel(InputSampler, UV, 0);
 
-    // Resolution mapping
-    // 1) Remove the input rect offset and scale: 0..1 across the view, independent of any texture size.
-    float2 ViewportUV = (UV - Input_UVViewportMin) * Input_UVViewportSizeInverse;
-    // 2) Map 0..1 into the scene textures using the render-resolution rect from the View uniform buffer:
     float2 StencilUV = ViewportUVToBufferUV(ViewportUV);
     
     // Keep the sample inside the view rect: the pooled texture is larger than the view
@@ -62,7 +73,7 @@ void MainPS(
     
     // IsSky check
     // DeviceZ is 0 at the far plane with reverse-Z: nothing was rendered, so this pixel is sky.
-    float DeviceZ = LookupDeviceZ(ScenePixelPos); // Gets scene depth
+    float DeviceZ = LookupDeviceZ(ScenePixelPos); // Raw depth buffer value of the scene at this texel
     bool bIsSky = DeviceZ <= 0.0;
 
     // Luminance
@@ -81,13 +92,59 @@ void MainPS(
     float Temperature = AmbientSceneTemperature;
 
     // If the stencil has a value, update temperature with that value
-    if (bTagVisible) Temperature = (float) StencilValue;
+    if (bTagVisible)
+        Temperature = (float) StencilValue;
     
     // If the pixel is sky, use sky temperature
-    if(bIsSky) Temperature = SkyTemperature;
+    if (bIsSky)
+        Temperature = SkyTemperature;
 
-    //Normalize temperature to use the ThermalPalette function
+    // Raw Celsius: normalization and palette happen after the blur, in the composite pass.
+    OutTemperatureTexture[Input_ViewportMin + DispatchThreadId] = Temperature;
+}
+
+// One direction of a separable Gaussian blur over the temperature field: two passes of 2R+1 taps
+// instead of one of (2R+1)^2. Weights are normalized by their sum, so radius and sigma stay independent.
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void BlurCS(uint2 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (any(DispatchThreadId >= (uint2) Input_ViewportSize))
+    {
+        return;
+    }
+
+    int2 CenterPos = (int2) (Input_ViewportMin + DispatchThreadId);
+
+    float WeightedSum = 0.0;
+    float WeightSum = 0.0;
+
+    for (int Tap = -BlurRadius; Tap <= BlurRadius; ++Tap)
+    {
+        // Clamp to the view rect: neighbours outside it belong to another view or to stale pool contents.
+        int2 SamplePos = clamp(CenterPos + Tap * BlurDirection, (int2) Input_ViewportMin, (int2) Input_ViewportMax - 1);
+
+        float Weight = exp(-0.5 * (Tap * Tap) / (BlurSigma * BlurSigma));
+        WeightedSum += Weight * TemperatureTexture.Load(int3(SamplePos, 0));
+        WeightSum += Weight;
+    }
+
+    OutTemperatureTexture[CenterPos] = WeightedSum / WeightSum;
+}
+
+void CompositePS(
+    noperspective float4 UVAndScreenPos : TEXCOORD0,
+    float4 SvPosition : SV_POSITION,
+    out float4 OutColor : SV_Target0
+)
+{
+    // Scene color is only read for its alpha: the RGB comes from the palette.
+    float2 UV = UVAndScreenPos.xy;
+    float4 SceneColor = InputTexture.SampleLevel(InputSampler, UV, 0);
+
+    // The temperature texture shares extent and view rect with the input, so the same UV maps to the same texel.
+    uint2 TexelPos = (uint2) floor(UV * Input_Extent);
+    float Temperature = TemperatureTexture.Load(int3(TexelPos, 0));
+
     float NormalizedTemperature = saturate((Temperature - TemperatureRangeMin) / max(TemperatureRangeMax - TemperatureRangeMin, 0.001));
-
     OutColor = float4(ThermalPalette(NormalizedTemperature), SceneColor.a);
 }
