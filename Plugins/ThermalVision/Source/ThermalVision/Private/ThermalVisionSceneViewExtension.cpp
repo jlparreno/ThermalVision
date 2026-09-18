@@ -17,17 +17,17 @@ static TAutoConsoleVariable<float> CVarThermalVisionAmbientTemperature(
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarThermalVisionTemperatureMin(
-	TEXT("r.ThermalVision.TemperatureMin"), 0.0f,
-	TEXT("Temperature in Celsius mapped to the cold end of the palette."),
+	TEXT("r.ThermalVision.TemperatureMin"), 5.0f,
+	TEXT("Temperature in Celsius mapped to the cold end of the palette. Tuned to the interior scene: a narrow range keeps the 5 to 50 band readable and lets lamps and hot cables clip to white, the way a real camera auto ranges."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarThermalVisionTemperatureMax(
-	TEXT("r.ThermalVision.TemperatureMax"), 100.0f,
+	TEXT("r.ThermalVision.TemperatureMax"), 50.0f,
 	TEXT("Temperature in Celsius mapped to the hot end of the palette."),
 	ECVF_RenderThreadSafe);
 
 static TAutoConsoleVariable<float> CVarThermalVisionLuminanceTemperatureGain(
-	TEXT("r.ThermalVision.LuminanceTemperatureGain"), 15.0f,
+	TEXT("r.ThermalVision.LuminanceTemperatureGain"), 30.0f,
 	TEXT("Degrees Celsius added to the ambient temperature at full scene luminance."),
 	ECVF_RenderThreadSafe);
 
@@ -44,6 +44,16 @@ static TAutoConsoleVariable<int32> CVarThermalVisionBlurRadius(
 static TAutoConsoleVariable<float> CVarThermalVisionBlurSigma(
 	TEXT("r.ThermalVision.BlurSigma"), 4.0f,
 	TEXT("Standard deviation in pixels of the Gaussian weights used by the blur."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionNoiseTemporal(
+	TEXT("r.ThermalVision.NoiseTemporal"), 4.0f,
+	TEXT("Peak to peak amplitude in Celsius of the per frame sensor grain. 0 disables it."),
+	ECVF_RenderThreadSafe);
+
+static TAutoConsoleVariable<float> CVarThermalVisionNoiseFixedPattern(
+	TEXT("r.ThermalVision.NoiseFixedPattern"), 4.0f,
+	TEXT("Peak to peak amplitude in Celsius of the static per pixel and per column pattern noise. 0 disables it."),
 	ECVF_RenderThreadSafe);
 
 // Reads scene color, custom stencil and scene depth, and writes raw Celsius into a texture of its own.
@@ -120,7 +130,7 @@ static FRDGTextureRef AddThermalVisionBlurPasses(FRDGBuilder& GraphBuilder,	cons
 
 // Normalizes the temperature, applies the palette and writes the pass output. Raster, because
 // OverrideOutput is not guaranteed to support UAV writes.
-static void AddThermalVisionCompositePass(FRDGBuilder& GraphBuilder,	const FSceneView& View,	const FScreenPassTextureViewport& InputViewport,	const FScreenPassTextureViewport& OutputViewport, FRDGTextureRef SceneColorTexture, FRDGTextureRef TemperatureTexture, const FScreenPassRenderTarget& Output, float TemperatureRangeMin, float TemperatureRangeMax)
+static void AddThermalVisionCompositePass(FRDGBuilder& GraphBuilder, const FSceneView& View, const FScreenPassTextureViewport& InputViewport, const FScreenPassTextureViewport& OutputViewport, FRDGTextureRef SceneColorTexture, FRDGTextureRef TemperatureTexture, const FScreenPassRenderTarget& Output, float TemperatureRangeMin, float TemperatureRangeMax, float NoiseTemporalAmount, float NoiseFixedPatternAmount)
 {
 	// Allocated in the graph builder memory because the pass executes after this function returns.
 	FThermalVisionCompositePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FThermalVisionCompositePS::FParameters>();
@@ -134,6 +144,11 @@ static void AddThermalVisionCompositePass(FRDGBuilder& GraphBuilder,	const FScen
 
 	PassParameters->TemperatureRangeMin = TemperatureRangeMin;
 	PassParameters->TemperatureRangeMax = TemperatureRangeMax;
+
+	// The view uniform buffer the renderer already uploaded: the shader only needs its per frame counter.
+	PassParameters->View = View.ViewUniformBuffer;
+	PassParameters->NoiseTemporalAmount = NoiseTemporalAmount;
+	PassParameters->NoiseFixedPatternAmount = NoiseFixedPatternAmount;
 
 	// Compiled at startup into the global shader map for this feature level.
 	TShaderMapRef<FThermalVisionCompositePS> PixelShader(GetGlobalShaderMap(View.GetFeatureLevel()));
@@ -232,7 +247,9 @@ FScreenPassTexture FThermalVisionSceneViewExtension::PostProcessPassAfterTonemap
 		TemperatureTexture,
 		Output,
 		CVarThermalVisionTemperatureMin.GetValueOnRenderThread(),
-		CVarThermalVisionTemperatureMax.GetValueOnRenderThread());
+		CVarThermalVisionTemperatureMax.GetValueOnRenderThread(),
+		FMath::Max(CVarThermalVisionNoiseTemporal.GetValueOnRenderThread(), 0.0f),
+		FMath::Max(CVarThermalVisionNoiseFixedPattern.GetValueOnRenderThread(), 0.0f));
 
 	// The next post process pass reads this texture. If we were the last pass, it's already the final target.
 	return MoveTemp(Output);

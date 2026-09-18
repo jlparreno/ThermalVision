@@ -25,6 +25,8 @@ float SkyTemperature;
 int2  BlurDirection;
 int   BlurRadius;
 float BlurSigma;
+float NoiseTemporalAmount;
+float NoiseFixedPatternAmount;
 
 // Ironbow-style ramp evaluated analytically. Each lerp only starts once the previous segment is saturated.
 float3 ThermalPalette(float NormalizedTemperature)
@@ -144,7 +146,32 @@ void CompositePS(
     // The temperature texture shares extent and view rect with the input, so the same UV maps to the same texel.
     uint2 TexelPos = (uint2) floor(UV * Input_Extent);
     float Temperature = TemperatureTexture.Load(int3(TexelPos, 0));
+    
+    // Sensor noise, in Celsius and before normalization: the grain has to scale with the palette range exactly like the signal does.
+    // Viewport relative so the pattern stays put when the view rect moves inside the pooled texture.
+    int2 NoisePixelPos = (int2) TexelPos - (int2) Input_ViewportMin;
 
+    // Sensor constants
+    const float NoiseGrainSize = 2.0;  // output pixels per noise cell
+    const uint NoiseFrameDivisor = 3u; // frames each noise step lasts: 60 fps / 3 = 20 Hz
+
+    float2 NoiseCellPos = floor((float2) NoisePixelPos / NoiseGrainSize);
+    float FrameId = (float) ((View.StateFrameIndex / NoiseFrameDivisor) & 1023u);
+    float TemporalNoise = (float) Rand3DPCG16(int3((int2) NoiseCellPos, (int) FrameId)).x / 65535.0 - 0.5;
+
+    // Fixed pattern noise: the same value in the same pixel forever, which is what reads as a sensor instead of as film grain. 
+    float PixelFPN = (float) Rand3DPCG16(int3(NoisePixelPos, 0)).x / 65535.0 - 0.5;
+    // Column term: a real bolometer reads out by columns and each column carries its own offset.
+    float ColumnFPN = (float) Rand3DPCG16(int3(NoisePixelPos.x, 0, 7)).x / 65535.0 - 0.5;
+    float FixedNoise = 0.7 * PixelFPN + 0.3 * ColumnFPN;
+
+    Temperature += NoiseTemporalAmount * TemporalNoise + NoiseFixedPatternAmount * FixedNoise;
+
+    // Normalization of temperatura
     float NormalizedTemperature = saturate((Temperature - TemperatureRangeMin) / max(TemperatureRangeMax - TemperatureRangeMin, 0.001));
-    OutColor = float4(ThermalPalette(NormalizedTemperature), SceneColor.a);
+    
+    // Real ironbow spends most of its low end in the darks, so a linear ramp leaves an ambient scene sitting
+    // mid palette and competing with the targets. Bias the ramp down without touching any temperature.
+    const float PaletteGamma = 1.6;
+    OutColor = float4(ThermalPalette(pow(NormalizedTemperature, PaletteGamma)), SceneColor.a);
 }

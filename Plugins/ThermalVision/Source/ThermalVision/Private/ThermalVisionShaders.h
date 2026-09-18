@@ -107,6 +107,12 @@ public:
 		SHADER_PARAMETER(float, TemperatureRangeMin)
 		// Temperature in Celsius mapped to the hot end of the palette. Everything above saturates.
 		SHADER_PARAMETER(float, TemperatureRangeMax)
+		// Reference to the view uniform buffer the renderer already uploaded, for the per frame counter used to animate the grain (View.StateFrameIndex).
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		// Peak to peak amplitude in Celsius of the grain that changes every frame.
+		SHADER_PARAMETER(float, NoiseTemporalAmount)
+		// Peak to peak amplitude in Celsius of the static pattern: per pixel plus per column, like a bolometer's readout offsets.
+		SHADER_PARAMETER(float, NoiseFixedPatternAmount)
 		// Render targets written by this pass. RenderTargets[0] is the pass output (OverrideOutput or a new texture).
 		RENDER_TARGET_BINDING_SLOTS()
 	END_SHADER_PARAMETER_STRUCT()
