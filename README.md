@@ -14,10 +14,6 @@ A thermal camera post-process for Unreal Engine 5.8, written in C++ against the 
 
 Same frame, same camera, one console variable apart. I am using explicit temperatures in the custom stencil buffer: the different figures read flat and hard-edged because a tag is a number, not a measurement. Everything else comes from the luminance: the ceiling lights and lamps clip to white, and the walls and floor get their whole tonal range from how lit they are.
 
-![GPU profile](docs/images/gpu_profile.png)
-
-`ProfileGPU` at 1567x969: the whole effect costs 0.41 ms, of which the two blur passes are 0.26 ms. TSR in the same frame is 4.07 ms.
-
 The scene in the images is a subway maintenance tunnel from Fab and is **not** included in this repository. Only the plugin and a minimal test map are.
 
 ---
@@ -34,6 +30,10 @@ Where the temperature of a pixel comes from, in priority order:
 ### Passes Added
 
 All four run under a single `RDG_EVENT_SCOPE_STAT`, so they group under `ThermalVision` in RenderDoc and in `ProfileGPU`.
+
+![GPU profile](docs/images/gpu_profile.png)
+
+`ProfileGPU` at 1567x969: the whole effect costs 0.41 ms, of which the two blur passes are 0.26 ms. TSR in the same frame is 4.07 ms.
 
 | Pass | Type | What it does |
 | --- | --- | --- |
