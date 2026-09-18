@@ -8,9 +8,8 @@ A thermal camera post-process for Unreal Engine 5.8, written in C++ against the 
 
 ## What It Looks Like
 
-| Visible | Thermal |
-| --- | --- |
-| ![Visible](docs/images/comparison_visible.png) | ![Thermal](docs/images/comparison_thermal.png) |
+![Visible](docs/images/comparison_visible.png)
+![Thermal](docs/images/comparison_thermal.png)
 
 Same frame, same camera, one console variable apart. I am using explicit temperatures in the custom stencil buffer: the different figures read flat and hard-edged because a tag is a number, not a measurement. Everything else comes from the luminance: the ceiling lights and lamps clip to white, and the walls and floor get their whole tonal range from how lit they are.
 
